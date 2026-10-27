@@ -33,3 +33,6 @@ nbactions.xml
 *.tfstate.backup
 *.tfstate.lock.info
 *.tfvars
+
+# Secrets de la stack Dockhand (jamais commités)
+.env.dockhand

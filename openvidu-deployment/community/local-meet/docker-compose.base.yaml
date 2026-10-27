@@ -1,10 +1,25 @@
+# Fichier de base OpenVidu Meet (scripts et configuration générés au premier démarrage).
+# Durcissement Deafsync : images figées par empreinte, aucun mot de passe par défaut,
+# tâches d'initialisation sans réseau, rotation des logs.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   generate-scripts:
-    image: alpine:3.24.1
+    image: alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
     entrypoint: ["/bin/sh", "-c"]
     restart: "no"
     user: root
+    # Tâche unique : écrit les scripts et la configuration dans les volumes, sans réseau
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     volumes:
       - scripts:/scripts
       - config:/config
@@ -131,7 +146,7 @@ services:
                 enabled: true
                 interval: 10s
                 expiration: 768h # 32 days
-                mongo_url: mongodb://${MONGO_ADMIN_USERNAME:-mongoadmin}:${MONGO_ADMIN_PASSWORD:-mongoadmin}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
+                mongo_url: mongodb://${MONGO_ADMIN_USERNAME:?MONGO_ADMIN_USERNAME manquant}:${MONGO_ADMIN_PASSWORD:?MONGO_ADMIN_PASSWORD manquant}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
 
         # LiveKit configuration
         port: 7880
@@ -144,7 +159,7 @@ services:
         redis:
             address: redis:6379
             username: ""
-            password: ${REDIS_PASSWORD:-redispassword}
+            password: ${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
             db: 0
             use_tls: false
         turn:
@@ -153,9 +168,9 @@ services:
             relay_range_start: 40000
             relay_range_end: 50000
         keys:
-            ${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-secret}
+            ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
         webhook:
-            api_key: ${LIVEKIT_API_KEY:-devkey}
+            api_key: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
             urls:
                 - http://host.docker.internal:6080/livekit/webhook
                 - http://openvidu-meet:6080/livekit/webhook
@@ -176,11 +191,11 @@ services:
         redis:
             address: redis:6379
             username: ""
-            password: ${REDIS_PASSWORD:-redispassword}
+            password: ${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
             db: 0
             use_tls: false
-        api_key: ${LIVEKIT_API_KEY:-devkey}
-        api_secret: ${LIVEKIT_API_SECRET:-secret}
+        api_key: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+        api_secret: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
         ws_url: ws://openvidu:7880
         rtmp_port: 1935
         whip_port: 8085
@@ -196,11 +211,11 @@ services:
         redis:
             address: redis:6379
             username: ""
-            password: ${REDIS_PASSWORD:-redispassword}
+            password: ${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
             db: 0
             use_tls: false
-        api_key: ${LIVEKIT_API_KEY:-devkey}
-        api_secret: ${LIVEKIT_API_SECRET:-secret}
+        api_key: ${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+        api_secret: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
         ws_url: ws://openvidu:7880
         health_port: 9091
 
@@ -211,8 +226,8 @@ services:
         # Storage for recordings.
         storage:
             s3:
-                access_key: ${MINIO_ACCESS_KEY:-minioadmin}
-                secret: ${MINIO_SECRET_KEY:-minioadmin}
+                access_key: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY manquant}
+                secret: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY manquant}
                 # Default region for minio
                 region: us-east-1
                 endpoint: http://minio:9000
@@ -252,8 +267,13 @@ services:
             min_disk_space_mb: 512
 
   setup:
-    image: docker.io/busybox:1.38.0
+    image: docker.io/busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
     restart: "no"
+    # Tâche unique : prépare les dossiers des volumes, sans réseau
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     volumes:
       - minio-data:/minio
       - mongo-data:/mongo

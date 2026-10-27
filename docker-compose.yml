@@ -1,0 +1,57 @@
+# Stack video-stream : dashboard OpenVidu (openvidu-dashboard/dashboard-ce)
+#
+# L'image est construite par GitHub Actions (.github/workflows/main.yml) et stockée dans
+# Harbor : pas de build sur le serveur. IMAGE_REPO et APP_TAG viennent de deploy/main.env
+# (fichier d'environnement de la stack Dockhand), écrit par le workflow à chaque déploiement.
+# Les secrets restent dans .env.dockhand (jamais commité) :
+#   ADMIN_USERNAME, ADMIN_PASSWORD   compte de connexion au dashboard
+#   DATABASE_URL                     MongoDB d'OpenVidu (mongodb://user:motdepasse@hôte:27017/?replicaSet=rs0)
+#   DASHBOARD_JWT_SECRET             au moins 32 caractères (sessions de connexion)
+#
+# Durcissement : disque en lecture seule, aucun privilège noyau, impossible de gagner
+# des droits, limites RAM/CPU, rotation des logs.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  dashboard:
+    image: ${IMAGE_REPO:?IMAGE_REPO manquant}:${APP_TAG:?APP_TAG manquant}
+    container_name: video_stream_dashboard
+    # Utilisateur "node" de l'image (pas root)
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    # Joignable uniquement depuis le serveur (reverse proxy devant)
+    ports:
+      - "127.0.0.1:8040:5000"
+    env_file:
+      - path: deploy/main.env
+        required: true
+      - path: .env.dockhand
+        required: true
+    environment:
+      SERVER_PORT: "5000"
+    networks:
+      - lambda_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    logging: *logging
+
+networks:
+  # Réseau partagé existant (reverse proxy, autres services Deafsync)
+  lambda_network:
+    external: true
+    name: lambda_network

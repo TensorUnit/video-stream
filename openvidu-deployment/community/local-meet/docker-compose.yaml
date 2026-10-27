@@ -1,61 +1,101 @@
+# Déploiement OpenVidu Meet (édition Community), à lancer avec le fichier de base :
+#   docker compose -f docker-compose.base.yaml -f docker-compose.yaml up -d
+#
+# Durcissement Deafsync appliqué (originaux dans _avant/video-stream/) :
+#   - images figées sur la version stable 3.9.0 + empreinte SHA-256 (plus de tag "main")
+#   - aucun mot de passe par défaut : chaque secret doit être fourni (.env), sinon la stack refuse de démarrer
+#   - ports d'administration et HTTP joignables seulement depuis le serveur (127.0.0.1, reverse proxy devant)
+#   - Redis, MinIO et MongoDB sans port publié : accessibles uniquement par le réseau interne de la stack
+#   - seuls les ports média WebRTC restent ouverts sur Internet (obligatoires pour la visio)
+#   - no-new-privileges partout, rotation des logs, socket Docker monté en lecture seule
+#   - disque en lecture seule et aucun privilège noyau pour Redis et le dashboard
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   caddy-proxy:
-    image: docker.io/openvidu/openvidu-caddy-local:main
+    image: docker.io/openvidu/openvidu-caddy-local:3.9.0@sha256:0c72870c2f2f0a0c7abf5906e026ef417828d86096b76fc8dc715d37c8846bf6
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
       - LAN_PRIVATE_IP=${LAN_PRIVATE_IP:-}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
-      - DASHBOARD_ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:-admin}
-      - DASHBOARD_ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:-admin}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:-admin}
-      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:-admin}
-      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:-meet-api-key}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
+      - DASHBOARD_ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:?DASHBOARD_ADMIN_USERNAME manquant}
+      - DASHBOARD_ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:?DASHBOARD_ADMIN_PASSWORD manquant}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY manquant}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?MINIO_SECRET_KEY manquant}
+      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:?MEET_INITIAL_ADMIN_USER manquant}
+      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:?MEET_INITIAL_ADMIN_PASSWORD manquant}
+      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:?MEET_INITIAL_API_KEY manquant}
       - MEET_BASE_PATH=${MEET_BASE_PATH:-/meet}
     volumes:
       - scripts:/scripts
       - /etc/localtime:/etc/localtime:ro
     entrypoint: /bin/sh /scripts/entrypoint_caddy.sh
+    # Entrée HTTP de la stack (Meet, dashboard, console MinIO) : seulement depuis le serveur,
+    # le reverse proxy HTTPS de Deafsync redirige vers 127.0.0.1:7880
     ports:
-      - 5443:5443
-      - 6443:6443
-      - 7443:7443
-      - 7880:7880
-      - 9443:9443
-      - 9080:9080
+      - 127.0.0.1:5443:5443
+      - 127.0.0.1:6443:6443
+      - 127.0.0.1:7443:7443
+      - 127.0.0.1:7880:7880
+      - 127.0.0.1:9443:9443
+      - 127.0.0.1:9080:9080
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     depends_on:
       setup:
         condition: service_completed_successfully
 
   redis:
-    image: docker.io/redis:8.10.2-alpine
+    image: docker.io/redis:8.10.2-alpine@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b
     restart: unless-stopped
-    ports:
-      - 6379:6379
+    # Pas de port publié : seuls les services de la stack joignent Redis
+    # Utilisateur "redis" de l'image (pas root)
+    user: "999:999"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m
     volumes:
       - redis:/data
       - /etc/localtime:/etc/localtime:ro
-    command: >
-      redis-server
-      --bind 0.0.0.0
-      --requirepass ${REDIS_PASSWORD:-redispassword}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
+    # Le mot de passe est écrit dans un fichier de config en mémoire plutôt que passé en
+    # argument (un argument est visible par "ps" sur l'hôte)
+    command:
+      - sh
+      - -c
+      - |
+        printf 'requirepass "%s"\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf --bind 0.0.0.0
+    logging: *logging
     depends_on:
       setup:
         condition: service_completed_successfully
 
   minio:
-    image: docker.io/openvidu/minio:RELEASE.2026-09-22T19-25-18Z-r0
+    image: docker.io/openvidu/minio:RELEASE.2026-09-22T19-25-18Z-r0@sha256:211ea94d3487bc42f9b4140f86c7d0123edba3c24160d0ef1057911504405c8e
     restart: unless-stopped
-    ports:
-      - 9000:9000
+    # Pas de port publié : Meet passe par minio:9000, la console par le proxy Caddy
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY manquant}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:?MINIO_SECRET_KEY manquant}
       - MINIO_DEFAULT_BUCKETS=openvidu-appdata
       - MINIO_CONSOLE_SUBPATH=/minio-console
       - MINIO_BROWSER_REDIRECT_URL=http://localhost:7880/minio-console
@@ -71,32 +111,44 @@ services:
         condition: service_completed_successfully
 
   mongo:
-    image: docker.io/openvidu/mongodb:8.0.29-r1
+    image: docker.io/openvidu/mongodb:8.0.29-r1@sha256:e4fa9dc24b29c61a970c46ca81e1505ac9bc9151952e0b4549bd157904d6c6fe
     restart: unless-stopped
-    ports:
-      - 27017:27017
+    # Pas de port publié : seuls les services de la stack joignent MongoDB
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     volumes:
       - mongo-data:/bitnami/mongodb
       - /etc/localtime:/etc/localtime:ro
     environment:
-      - MONGODB_ROOT_USER=${MONGO_ADMIN_USERNAME:-mongoadmin}
-      - MONGODB_ROOT_PASSWORD=${MONGO_ADMIN_PASSWORD:-mongoadmin}
+      - MONGODB_ROOT_USER=${MONGO_ADMIN_USERNAME:?MONGO_ADMIN_USERNAME manquant}
+      - MONGODB_ROOT_PASSWORD=${MONGO_ADMIN_PASSWORD:?MONGO_ADMIN_PASSWORD manquant}
       - MONGODB_ADVERTISED_HOSTNAME=mongo
       - MONGODB_REPLICA_SET_MODE=primary
       - MONGODB_REPLICA_SET_NAME=rs0
-      - MONGODB_REPLICA_SET_KEY=devreplicasetkey
+      - MONGODB_REPLICA_SET_KEY=${MONGO_REPLICA_SET_KEY:?MONGO_REPLICA_SET_KEY manquant}
     depends_on:
       setup:
         condition: service_completed_successfully
 
   dashboard:
-    image: docker.io/openvidu/openvidu-dashboard:main
+    image: docker.io/openvidu/openvidu-dashboard:3.9.0@sha256:78ea9e931c16dbbbf19f8f8f8d9518273aff423621b02373150dd123748f4684
     restart: unless-stopped
+    # Utilisateur "node" de l'image (pas root)
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    logging: *logging
     environment:
       - SERVER_PORT=5000
-      - ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:-admin}
-      - DATABASE_URL=mongodb://${MONGO_ADMIN_USERNAME:-mongoadmin}:${MONGO_ADMIN_PASSWORD:-mongoadmin}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
+      - ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:?DASHBOARD_ADMIN_USERNAME manquant}
+      - ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:?DASHBOARD_ADMIN_PASSWORD manquant}
+      - DATABASE_URL=mongodb://${MONGO_ADMIN_USERNAME:?MONGO_ADMIN_USERNAME manquant}:${MONGO_ADMIN_PASSWORD:?MONGO_ADMIN_PASSWORD manquant}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
     volumes:
       - /etc/localtime:/etc/localtime:ro
     depends_on:
@@ -104,16 +156,21 @@ services:
         condition: service_completed_successfully
 
   openvidu:
-    image: docker.io/openvidu/openvidu-server:main
+    image: docker.io/openvidu/openvidu-server:3.9.0@sha256:21a234c29f35ecc8f7c7c804059167242433c1266ff63f23c60e92848ace072e
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
       - LAN_PRIVATE_IP=${LAN_PRIVATE_IP:-}
+    # Ports média WebRTC (audio / vidéo) : ils DOIVENT rester ouverts sur Internet et
+    # ne passent pas par Cloudflare (UDP). À autoriser aussi dans le pare-feu du serveur.
     ports:
       - 3478:3478/udp
       - 7881:7881/tcp
       - 7900-7999:7900-7999/udp
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     entrypoint: /bin/sh /scripts/entrypoint_openvidu.sh
     command: --config /config/livekit.yaml
     volumes:
@@ -125,14 +182,19 @@ services:
         condition: service_completed_successfully
 
   ingress:
-    image: docker.io/openvidu/ingress:main
+    image: docker.io/openvidu/ingress:3.9.0@sha256:4eb9752fbd438e86957ec7bae82bb75b3ae17f9e5444cb557185d5498c4bc246
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
+    # Ingress (diffusion entrante RTMP / WHIP) : inutile pour OpenVidu Meet, donc fermé à
+    # Internet. À rouvrir seulement si une diffusion RTMP / WHIP externe est mise en place.
     ports:
-      - 1935:1935
-      - 8085:8085
-      - 7895:7895/udp
+      - 127.0.0.1:1935:1935
+      - 127.0.0.1:8085:8085
+      - 127.0.0.1:7895:7895/udp
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     environment:
       - INGRESS_CONFIG_FILE=/config/ingress.yaml
     volumes:
@@ -143,12 +205,15 @@ services:
         condition: service_completed_successfully
 
   egress:
-    image: docker.io/openvidu/egress:main
+    image: docker.io/openvidu/egress:3.9.0@sha256:b2708188cf3aded6c1a186148aef69a31175328dfc60e76d5602f5e682d4e086
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
     environment:
       - EGRESS_CONFIG_FILE=/config/egress.yaml
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     volumes:
       - config:/config
       - egress-data:/home/egress/tmp
@@ -158,10 +223,16 @@ services:
         condition: service_completed_successfully
 
   operator:
-    image: docker.io/openvidu/openvidu-operator:main
+    image: docker.io/openvidu/openvidu-operator:3.9.0@sha256:096b398865bd10bdc619992299061f866a636601f34f9f3ad42c61fa3c0020be
     restart: unless-stopped
+    # Le socket Docker donne un contrôle total de l'hôte : l'operator en a besoin pour lancer
+    # les agents IA (transcription). Monté en lecture seule, mais ":ro" n'empêche pas les appels
+    # à l'API Docker. À retirer avec le service si les agents IA ne sont pas utilisés.
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - agents-config:/agents-config
       - operator-deployment:/deployment
       - /etc/localtime:/etc/localtime:ro
@@ -172,16 +243,16 @@ services:
       - NETWORK_NAME=openvidu-community
       - AGENTS_CONFIG_VOLUME=openvidu-agents-config
       - LIVEKIT_URL=ws://openvidu:7880/
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
       - REDIS_ADDRESS=redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
     depends_on:
       setup:
         condition: service_completed_successfully
 
   openvidu-meet:
-    image: docker.io/openvidu/openvidu-meet:main
+    image: docker.io/openvidu/openvidu-meet:3.9.0@sha256:e0fe9687e3e67078369324cfcf7b8a0ea7f39655a0ae1ca9900376f80991bdda
     restart: on-failure
     extra_hosts:
       - host.docker.internal:host-gateway
@@ -190,56 +261,63 @@ services:
       - SERVER_PORT=6080
       - MEET_LOG_LEVEL=info
       - MEET_NAME_ID=openviduMeet-LOCAL
-      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:-meet-api-key}
-      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:-admin}
-      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:-admin}
-      - MEET_COOKIE_SECURE=false
+      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:?MEET_INITIAL_API_KEY manquant}
+      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:?MEET_INITIAL_ADMIN_USER manquant}
+      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:?MEET_INITIAL_ADMIN_PASSWORD manquant}
+      # Servi en HTTPS par le reverse proxy : cookies envoyés seulement en HTTPS
+      - MEET_COOKIE_SECURE=true
       - MEET_INITIAL_WEBHOOK_ENABLED=true
       - MEET_INITIAL_WEBHOOK_URL=http://host.docker.internal:6080/webhook
       - LIVEKIT_URL_PRIVATE=ws://openvidu:7880/
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
       - MEET_S3_BUCKET=openvidu-appdata
       - MEET_S3_SUBBUCKET=openvidu-meet
       - MEET_S3_SERVICE_ENDPOINT=http://minio:9000
-      - MEET_S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MEET_S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MEET_S3_ACCESS_KEY=${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY manquant}
+      - MEET_S3_SECRET_KEY=${MINIO_SECRET_KEY:?MINIO_SECRET_KEY manquant}
       - MEET_AWS_REGION=us-east-1
       - MEET_S3_WITH_PATH_STYLE_ACCESS=true
       - MEET_REDIS_HOST=redis
       - MEET_REDIS_PORT=6379
-      - MEET_REDIS_PASSWORD=${REDIS_PASSWORD:-redispassword}
+      - MEET_REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD manquant}
       - MEET_REDIS_DB=0
-      - MEET_MONGO_URI=mongodb://${MONGO_ADMIN_USERNAME:-mongoadmin}:${MONGO_ADMIN_PASSWORD:-mongoadmin}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
+      - MEET_MONGO_URI=mongodb://${MONGO_ADMIN_USERNAME:?MONGO_ADMIN_USERNAME manquant}:${MONGO_ADMIN_PASSWORD:?MONGO_ADMIN_PASSWORD manquant}@mongo:27017/?replicaSet=rs0&readPreference=primaryPreferred
       - MEET_BASE_PATH=${MEET_BASE_PATH:-/meet}
     volumes:
       - scripts:/scripts
       - /etc/localtime:/etc/localtime:ro
     entrypoint: /bin/sh /scripts/entrypoint_openvidu_meet.sh
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     depends_on:
       setup:
         condition: service_completed_successfully
 
   openvidu-meet-init:
-    image: docker.io/openvidu/openvidu-operator:main
+    image: docker.io/openvidu/openvidu-operator:3.9.0@sha256:096b398865bd10bdc619992299061f866a636601f34f9f3ad42c61fa3c0020be
     restart: on-failure
     environment:
       - MODE=local-ready-check
       - OPENVIDU_ENVIRONMENT=local-meet
       - LAN_PRIVATE_IP=${LAN_PRIVATE_IP:-}
-      - DASHBOARD_ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:-admin}
-      - DASHBOARD_ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:-admin}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
-      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:-admin}
-      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:-admin}
-      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:-meet-api-key}
+      - DASHBOARD_ADMIN_USERNAME=${DASHBOARD_ADMIN_USERNAME:?DASHBOARD_ADMIN_USERNAME manquant}
+      - DASHBOARD_ADMIN_PASSWORD=${DASHBOARD_ADMIN_PASSWORD:?DASHBOARD_ADMIN_PASSWORD manquant}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY manquant}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?MINIO_SECRET_KEY manquant}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:?LIVEKIT_API_KEY manquant}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET manquant}
+      - MEET_INITIAL_ADMIN_USER=${MEET_INITIAL_ADMIN_USER:?MEET_INITIAL_ADMIN_USER manquant}
+      - MEET_INITIAL_ADMIN_PASSWORD=${MEET_INITIAL_ADMIN_PASSWORD:?MEET_INITIAL_ADMIN_PASSWORD manquant}
+      - MEET_INITIAL_API_KEY=${MEET_INITIAL_API_KEY:?MEET_INITIAL_API_KEY manquant}
     volumes:
       - scripts:/scripts
       - /etc/localtime:/etc/localtime:ro
     entrypoint: /bin/sh /scripts/entrypoint_ready_check.sh
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
     depends_on:
       - caddy-proxy
       - redis
