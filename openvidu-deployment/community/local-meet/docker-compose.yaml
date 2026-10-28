@@ -627,3 +627,6 @@ volumes:
     name: openvidu-egress-data
   operator-deployment:
     name: openvidu-operator-deployment
+networks:
+  default:
+    name: openvidu-community
