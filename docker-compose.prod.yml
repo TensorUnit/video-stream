@@ -1,0 +1,63 @@
+# Stack video-stream - PRODUCTION
+#
+# Utilisé par la stack de production dans Dockhand (branche main, fichier docker-compose.prod.yml).
+# Les images viennent de Harbor avec le tag JJMM.AAAA.NN construit par main.yml.
+#
+# Déploiement MANUEL par le chef, jamais automatique (aucun webhook) :
+#   1. main.yml annonce le tag de l'image (résumé du job / Discord) ;
+#   2. coller ce tag dans la variable APP_TAG de la stack de production dans Dockhand ;
+#   3. redéployer la stack.
+# Retour arrière : remettre l'ancien tag dans APP_TAG, puis redéployer.
+# Prune automatique désactivé en prod (anciennes images gardées pour le retour arrière) :
+# le lancer à la main après un déploiement réussi.
+#
+# Variables de la STACK Dockhand, comme deploy/develop.env en develop (pas dans .env.dockhand,
+# qui ne sert qu'aux conteneurs) :
+#   IMAGE_REPO=agbanhoun.deafsync.com/video-stream-openvidu/openvidu-dashboard
+#   APP_TAG=<tag JJMM.AAAA.NN annoncé par main.yml>
+# La prod tourne sur son propre serveur : mêmes noms de conteneurs et mêmes ports que develop.
+# Les secrets de production restent dans le fichier d'environnement de la stack prod
+# (jamais commité).
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  dashboard:
+    image: ${IMAGE_REPO:?IMAGE_REPO manquant}:${APP_TAG:?APP_TAG manquant}
+    container_name: video_stream_dashboard
+    # Utilisateur "node" de l'image (pas root)
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    # Joignable uniquement depuis le serveur (reverse proxy devant)
+    ports:
+      - "127.0.0.1:8040:5000"
+    env_file:
+      - path: .env.dockhand
+        required: true
+    environment:
+      SERVER_PORT: "5000"
+    networks:
+      - lambda_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    logging: *logging
+
+networks:
+  # Réseau partagé existant (reverse proxy, autres services Deafsync)
+  lambda_network:
+    external: true
+    name: lambda_network

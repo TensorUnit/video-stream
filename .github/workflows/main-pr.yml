@@ -1,0 +1,67 @@
+name: Main - Analyse Sonar de la Pull Request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Un nouveau push sur la PR annule l'analyse en cours : seule la dernière version compte
+concurrency:
+  group: main-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sonar-pr:
+    name: Sonar (code de la PR)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0  # nécessaire pour comparer la PR avec main
+
+      - name: Lister les fichiers modifiés par la PR
+        id: files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # Fichiers ajoutés ou modifiés (pas les fichiers supprimés)
+          FILES=$(git diff --name-only --diff-filter=d "${BASE_SHA}...HEAD" | paste -sd, -)
+          if [ -z "$FILES" ]; then
+            echo "Aucun fichier à analyser dans cette PR"
+          else
+            echo "Fichiers analysés :"; echo "$FILES" | tr , '\n'
+          fi
+          echo "list=${FILES}" >> "$GITHUB_OUTPUT"
+
+      - name: Démarrer le proxy Cloudflare Access
+        if: steps.files.outputs.list != ''
+        env:
+          SONAR_UPSTREAM: ${{ secrets.SONAR_HOST_URL }}
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bash .github/scripts/sonar-proxy.sh start
+
+      - uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        if: steps.files.outputs.list != ''
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: http://127.0.0.1:9000
+        with:
+          # sonar.sources=. : voir les fichiers de la PR partout dans le dépôt, pas seulement dans app/.
+          # sonar.inclusions limite l'analyse aux fichiers de la PR ;
+          # les exclusions de sonar-project.properties restent appliquées.
+          args: >
+            -Dsonar.projectKey=tensorunit-video-stream
+            -Dsonar.sources=.
+            -Dsonar.projectVersion=PR-${{ github.event.pull_request.number }}
+            -Dsonar.inclusions=${{ steps.files.outputs.list }}
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=600
+
+      - name: Arrêter le proxy
+        if: always()
+        run: bash .github/scripts/sonar-proxy.sh stop
