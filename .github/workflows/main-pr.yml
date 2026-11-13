@@ -46,6 +46,7 @@ jobs:
         run: bash .github/scripts/sonar-proxy.sh start
 
       - uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        id: sonar
         if: steps.files.outputs.list != ''
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -61,6 +62,16 @@ jobs:
             -Dsonar.inclusions=${{ steps.files.outputs.list }}
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=600
+
+      # En cas d'échec de l'analyse : affiche la cause exacte dans le log et le résumé du run
+      # (conditions de la Quality Gate avec valeur et seuil, problèmes avec fichier et ligne,
+      # ou token refusé / Sonar injoignable). Doit passer avant l'arrêt du proxy.
+      - name: Afficher la cause de l'échec Sonar
+        if: failure() && steps.sonar.outcome == 'failure'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: tensorunit-video-stream
+        run: bash .github/scripts/sonar-gate-report.sh
 
       - name: Arrêter le proxy
         if: always()
